@@ -9,7 +9,7 @@ The three fast projection variants are:
 - `:LinearPressureProjectionRungeKutta3`, corresponding to FPJ-1.
 - `:MidpointPressureProjectionRungeKutta3`, corresponding to FPJ-2.
 
-See there [pull request in Oceananigans.jl](https://github.com/CliMA/Oceananigans.jl/pull/5059) which implements these methods for technical details.
+See the [pull request in Oceananigans.jl](https://github.com/CliMA/Oceananigans.jl/pull/5059) which implements these methods for technical details.
 
 The experiments use a horizontal shear layer in a unit cube, first on a regular domain and then over a staircase immersed-boundary bottom topography.
 For each case, the scripts run the convergence experiment, save visualization data, benchmark wall-clock runtime, and then make the figures used in the manuscript.

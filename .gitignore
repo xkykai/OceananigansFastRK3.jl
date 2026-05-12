@@ -74,3 +74,5 @@ statprof
 
 # MCPRepl security configuration (contains API keys)
 .mcprepl/
+
+!/assets/*

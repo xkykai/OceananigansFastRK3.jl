@@ -3,7 +3,6 @@ using Oceananigans.Units
 using Printf
 using JLD2
 using Statistics
-# using CairoMakie
 using CUDA
 using CairoMakie
 using BenchmarkTools
@@ -57,8 +56,10 @@ filename_prefix = "shear_flow_upwindbiased$(advection_order)"
 
 grid = setup_grid(Nx, Ny, Nz)
 
-cfls = [0.8, 0.4, 0.3, 0.2, 0.1, 0.05]
-Δts = cfls .* Δx ./ 1
+# cfls = [0.8, 0.4, 0.3, 0.2, 0.1, 0.05]
+# cfls = [0.7]
+cfls = [0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1, 0.05]
+Δts = cfls .* Δx ./ 1.6
 Δt_ref = Δts[end] / 8
 
 stop_time = 10
@@ -67,29 +68,16 @@ stop_time = 10
 # timestepper = :LeMoinRungeKutta3
 # timesteppers = [:RungeKutta3]
 timesteppers = [:RungeKutta3, :LeMoinRungeKutta3FPJ0, :LeMoinRungeKutta3FPJ1, :LeMoinRungeKutta3FPJ2]
+# timesteppers = [:RungeKutta3, :LeMoinRungeKutta3FPJ0]
+# timesteppers = [:LeMoinRungeKutta3FPJ1, :LeMoinRungeKutta3FPJ2]
 
 const DATA_DIR = joinpath(@__DIR__, "data")
+const OUTPUT_DIR = joinpath(@__DIR__, "output")
 mkpath(DATA_DIR)
+mkpath(OUTPUT_DIR)
 
-function run_simulation(; timestpr, Δt, filename)
+function run_simulation(; timestepper, Δt, filename)
     grid = setup_grid(Nx, Ny, Nz)
-
-    model_prototype = setup_model(grid)
-    
-    if timestpr == :LeMoinRungeKutta3FPJ0
-        α = β = 0
-        timestepper = LeMoinRungeKutta3TimeStepper(grid, prognostic_fields(model_prototype); α, β)
-    elseif timestpr == :LeMoinRungeKutta3FPJ1
-        α = 1
-        β = 0
-        timestepper = LeMoinRungeKutta3TimeStepper(grid, prognostic_fields(model_prototype); α, β)
-    elseif timestpr == :LeMoinRungeKutta3FPJ2
-        α = 1 // 2
-        β = 1 // 2
-        timestepper = LeMoinRungeKutta3TimeStepper(grid, prognostic_fields(model_prototype); α, β)
-    else
-        timestepper = RungeKutta3TimeStepper(grid, prognostic_fields(model_prototype))
-    end
 
     model = setup_model(grid, timestepper)
     initial_conditions!(model)
@@ -141,12 +129,12 @@ end
 for ts in timesteppers, Δt in Δts
     filename = "$(filename_prefix)_$(ts)_Nx$(Nx)_Δt$(Δt).jld2"
     @info "Running $ts with Δt = $Δt"
-    run_simulation(timestpr=ts, Δt=Δt, filename=filename)
+    run_simulation(timestepper=ts, Δt=Δt, filename=filename)
 end
 
-filename_ref = "$(filename_prefix)_RungeKutta3_Nx$(Nx)_Δt$(Δt_ref).jld2"
-@info "Running REFERENCE RungeKutta3 with Δt = $Δt_ref"
-run_simulation(timestpr=:RungeKutta3, Δt=Δt_ref, filename=filename_ref)
+# filename_ref = "$(filename_prefix)_RungeKutta3_Nx$(Nx)_Δt$(Δt_ref).jld2"
+# @info "Running REFERENCE RungeKutta3 with Δt = $Δt_ref"
+# run_simulation(timestepper=:RungeKutta3, Δt=Δt_ref, filename=filename_ref)
 
 #%%
 rk_filenames = ["$(filename_prefix)_RungeKutta3_Nx$(Nx)_Δt$(Δt).jld2" for Δt in Δts]
@@ -168,21 +156,45 @@ l2_w_datas = [FieldTimeSeries(joinpath(DATA_DIR, f), "w") for f in l2_filenames]
 ref_u_data = FieldTimeSeries(joinpath(DATA_DIR, ref_filename), "u")
 ref_w_data = FieldTimeSeries(joinpath(DATA_DIR, ref_filename), "w")
 
-u_ref = interior(ref_u_data[length(ref_u_data.times)], :, :, :)
-w_ref = interior(ref_w_data[length(ref_w_data.times)], :, :, :)
+u_ref = interior(ref_u_data[2], :, :, :)
+w_ref = interior(ref_w_data[2], :, :, :)
 
 function final_time_errors(ut, wt)
-    n = length(ut.times)
+    # n = length(ut.times)
+    n = 2
+    try
+        u_num = interior(ut[n], :, :, :)
+        w_num = interior(wt[n], :, :, :)
 
-    u_num = interior(ut[n], :, :, :)
-    w_num = interior(wt[n], :, :, :)
+        eu = u_num .- u_ref
+        ew = w_num .- w_ref
 
-    eu = u_num .- u_ref
-    ew = w_num .- w_ref
+        L2_u = sqrt(mean(eu.^2))
+        L2_w = sqrt(mean(ew.^2))
 
-    return (; L∞_u = maximum(abs, eu), L∞_w = maximum(abs, ew),
-              L2_u = sqrt(mean(eu.^2)), L2_w = sqrt(mean(ew.^2)))
+        L∞_u = maximum(abs, eu)
+        L∞_w = maximum(abs, ew)
+
+        return (; L∞_u = maximum(abs, eu), L∞_w = maximum(abs, ew),
+                L2_u = sqrt(mean(eu.^2)), L2_w = sqrt(mean(ew.^2)),
+                L2 = sqrt(L2_u^2 + L2_w^2), L∞ = max(L∞_u, L∞_w))
+    catch e
+        @warn "Error computing final time errors: $(typeof(e))"
+        return (; L∞_u = NaN, L∞_w = NaN, L2_u = NaN, L2_w = NaN, L2 = NaN, L∞ = NaN)
+    end
 end
+#%%
+rk_L2_errs = zeros(length(rk_u_datas))
+rk_L∞_errs = zeros(length(rk_u_datas))
+
+l0_L2_errs = zeros(length(l0_u_datas))
+l0_L∞_errs = zeros(length(l0_u_datas))
+
+l1_L2_errs = zeros(length(l1_u_datas))
+l1_L∞_errs = zeros(length(l1_u_datas))
+
+l2_L2_errs = zeros(length(l2_u_datas))
+l2_L∞_errs = zeros(length(l2_u_datas))
 
 rk_L2_u_errs = zeros(length(rk_u_datas))
 rk_L2_w_errs = zeros(length(rk_w_datas))
@@ -226,6 +238,18 @@ for i in eachindex(rk_u_datas)
     l2_L2_w_errs[i] = l2_errs.L2_w
     l2_L∞_u_errs[i] = l2_errs.L∞_u
     l2_L∞_w_errs[i] = l2_errs.L∞_w
+
+    rk_L2_errs[i] = rk_errs.L2
+    rk_L∞_errs[i] = rk_errs.L∞
+
+    l0_L2_errs[i] = l0_errs.L2
+    l0_L∞_errs[i] = l0_errs.L∞
+
+    l1_L2_errs[i] = l1_errs.L2
+    l1_L∞_errs[i] = l1_errs.L∞
+
+    l2_L2_errs[i] = l2_errs.L2
+    l2_L∞_errs[i] = l2_errs.L∞
 end
 
 function fit_power_law(Δts, errors)
@@ -247,30 +271,97 @@ function fit_power_law(Δts, errors)
     return slope, fit_errors
 end
 #%%
+cfls_for_ticks = [0.8, 0.6, 0.4, 0.3, 0.2, 0.1, 0.05]
+Δts_for_ticks = cfls_for_ticks .* Δx ./ 1.6
+cfl_labels = String[string(round(c, digits=2)) for c in cfls_for_ticks]
+
+fig = Figure(size=(900, 500), fontsize=15)
+axL2 = Axis(fig[1, 1], xlabel="Δt", ylabel="L2 error", xscale=log10, yscale=log10, xticklabelcolor=:blue, xlabelcolor=:blue, xtickcolor=:blue)
+axL∞ = Axis(fig[1, 2], xlabel="Δt", ylabel="L∞ error", xscale=log10, yscale=log10, xticklabelcolor=:blue, xlabelcolor=:blue, xtickcolor=:blue)
+axL2_2 = Axis(fig[1, 1], xscale=log10, xticklabelcolor=:red, xlabel="Advective CFL", xaxisposition=:top, xlabelcolor=:red, xtickcolor=:red, xticks=(Δts_for_ticks, cfl_labels))
+axL∞_2 = Axis(fig[1, 2], xscale=log10, xticklabelcolor=:red, xlabel="Advective CFL", xaxisposition=:top, xlabelcolor=:red, xtickcolor=:red, xticks=(Δts_for_ticks, cfl_labels))
+
+linkxaxes!(axL2, axL2_2)
+linkxaxes!(axL∞, axL∞_2)
+
+hidespines!(axL2_2)
+hidespines!(axL∞_2)
+hideydecorations!(axL2_2)
+hideydecorations!(axL∞_2)
+hidexdecorations!(axL2_2, ticks=false, ticklabels=false, label=false)
+hidexdecorations!(axL∞_2, ticks=false, ticklabels=false, label=false)
+
+l0_fit_start = 5
+l1_fit_start = 7
+l2_fit_start = 7
+rk_fit_start = 4
+markersize = 13
+linewidth = 2
+
+l0_L2_slope, l0_L2_fit = fit_power_law(Δts[l0_fit_start:end], l0_L2_errs[l0_fit_start:end])
+l0_L∞_slope, l0_L∞_fit = fit_power_law(Δts[l0_fit_start:end], l0_L∞_errs[l0_fit_start:end])
+l1_L2_slope, l1_L2_fit = fit_power_law(Δts[l1_fit_start:end], l1_L2_errs[l1_fit_start:end])
+l1_L∞_slope, l1_L∞_fit = fit_power_law(Δts[l1_fit_start:end], l1_L∞_errs[l1_fit_start:end])
+l2_L2_slope, l2_L2_fit = fit_power_law(Δts[l2_fit_start:end], l2_L2_errs[l2_fit_start:end])
+l2_L∞_slope, l2_L∞_fit = fit_power_law(Δts[l2_fit_start:end], l2_L∞_errs[l2_fit_start:end])
+rk_L2_slope, rk_L2_fit = fit_power_law(Δts[rk_fit_start:end], rk_L2_errs[rk_fit_start:end])
+rk_L∞_slope, rk_L∞_fit = fit_power_law(Δts[rk_fit_start:end], rk_L∞_errs[rk_fit_start:end])
+
+scatter!(axL2, Δts, l0_L2_errs, markersize=markersize, marker=:circle)
+scatter!(axL2, Δts, l1_L2_errs, markersize=markersize, marker=:rect)
+scatter!(axL2, Δts, l2_L2_errs, markersize=markersize, marker=:utriangle)
+scatter!(axL2, Δts, rk_L2_errs, markersize=markersize, marker=:cross)
+
+lines!(axL2, Δts[l0_fit_start:end], l0_L2_fit, label="FPJ0 (slope = $(round(l0_L2_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l1_fit_start:end], l1_L2_fit, label="FPJ1 (slope = $(round(l1_L2_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l2_fit_start:end], l2_L2_fit, label="FPJ2 (slope = $(round(l2_L2_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[rk_fit_start:end], rk_L2_fit, label="RK3 (slope = $(round(rk_L2_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
+
+scatter!(axL∞, Δts, l0_L∞_errs, markersize=markersize, marker=:circle)
+scatter!(axL∞, Δts, l1_L∞_errs, markersize=markersize, marker=:rect)
+scatter!(axL∞, Δts, l2_L∞_errs, markersize=markersize, marker=:utriangle)
+scatter!(axL∞, Δts, rk_L∞_errs, markersize=markersize, marker=:cross)
+
+lines!(axL∞, Δts[l0_fit_start:end], l0_L∞_fit, label="FPJ0 (slope = $(round(l0_L∞_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l1_fit_start:end], l1_L∞_fit, label="FPJ1 (slope = $(round(l1_L∞_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l2_fit_start:end], l2_L∞_fit, label="FPJ2 (slope = $(round(l2_L∞_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[rk_fit_start:end], rk_L∞_fit, label="RK3 (slope = $(round(rk_L∞_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
+
+axislegend(axL2, position=:rb)
+axislegend(axL∞, position=:rb)
+display(fig)
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_combined_error_convergence.png"), fig, px_per_unit=4)
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_combined_error_convergence.pdf"), fig)
+# save(joinpath(OUTPUT_DIR, "$(filename_prefix)_combined_error_convergence_test.png"), fig, px_per_unit=4)
+# save(joinpath(OUTPUT_DIR, "$(filename_prefix)_combined_error_convergence_test.pdf"), fig)
+#%%
 fig = Figure(size=(900, 500), fontsize=15)
 axL2 = Axis(fig[1, 1], title="L2 error at final time", xlabel="Δt", ylabel="L2 error", xscale=log10, yscale=log10)
 axL∞ = Axis(fig[1, 2], title="L∞ error at final time", xlabel="Δt", ylabel="L∞ error", xscale=log10, yscale=log10)
 
-lm_fit_start = 3
+l0_fit_start = 2
+l1_fit_start = 4
+l2_fit_start = 4
+rk_fit_start = 2
 markersize = 10
 linewidth = 3
-l0_L2_u_slope, l0_L2_u_fit = fit_power_law(Δts[lm_fit_start:end], l0_L2_u_errs[lm_fit_start:end])
-l0_L2_w_slope, l0_L2_w_fit = fit_power_law(Δts[lm_fit_start:end], l0_L2_w_errs[lm_fit_start:end])
-l0_L∞_u_slope, l0_L∞_u_fit = fit_power_law(Δts[lm_fit_start:end], l0_L∞_u_errs[lm_fit_start:end])
-l0_L∞_w_slope, l0_L∞_w_fit = fit_power_law(Δts[lm_fit_start:end], l0_L∞_w_errs[lm_fit_start:end])
-l1_L2_u_slope, l1_L2_u_fit = fit_power_law(Δts[lm_fit_start:end], l1_L2_u_errs[lm_fit_start:end])
-l1_L2_w_slope, l1_L2_w_fit = fit_power_law(Δts[lm_fit_start:end], l1_L2_w_errs[lm_fit_start:end])
-l1_L∞_u_slope, l1_L∞_u_fit = fit_power_law(Δts[lm_fit_start:end], l1_L∞_u_errs[lm_fit_start:end])
-l1_L∞_w_slope, l1_L∞_w_fit = fit_power_law(Δts[lm_fit_start:end], l1_L∞_w_errs[lm_fit_start:end])
-l2_L2_u_slope, l2_L2_u_fit = fit_power_law(Δts[lm_fit_start:end], l2_L2_u_errs[lm_fit_start:end])
-l2_L2_w_slope, l2_L2_w_fit = fit_power_law(Δts[lm_fit_start:end], l2_L2_w_errs[lm_fit_start:end])
-l2_L∞_u_slope, l2_L∞_u_fit = fit_power_law(Δts[lm_fit_start:end], l2_L∞_u_errs[lm_fit_start:end])
-l2_L∞_w_slope, l2_L∞_w_fit = fit_power_law(Δts[lm_fit_start:end], l2_L∞_w_errs[lm_fit_start:end])
+l0_L2_u_slope, l0_L2_u_fit = fit_power_law(Δts[l0_fit_start:end], l0_L2_u_errs[l0_fit_start:end])
+l0_L2_w_slope, l0_L2_w_fit = fit_power_law(Δts[l0_fit_start:end], l0_L2_w_errs[l0_fit_start:end])
+l0_L∞_u_slope, l0_L∞_u_fit = fit_power_law(Δts[l0_fit_start:end], l0_L∞_u_errs[l0_fit_start:end])
+l0_L∞_w_slope, l0_L∞_w_fit = fit_power_law(Δts[l0_fit_start:end], l0_L∞_w_errs[l0_fit_start:end])
+l1_L2_u_slope, l1_L2_u_fit = fit_power_law(Δts[l1_fit_start:end], l1_L2_u_errs[l1_fit_start:end])
+l1_L2_w_slope, l1_L2_w_fit = fit_power_law(Δts[l1_fit_start:end], l1_L2_w_errs[l1_fit_start:end])
+l1_L∞_u_slope, l1_L∞_u_fit = fit_power_law(Δts[l1_fit_start:end], l1_L∞_u_errs[l1_fit_start:end])
+l1_L∞_w_slope, l1_L∞_w_fit = fit_power_law(Δts[l1_fit_start:end], l1_L∞_w_errs[l1_fit_start:end])
+l2_L2_u_slope, l2_L2_u_fit = fit_power_law(Δts[l2_fit_start:end], l2_L2_u_errs[l2_fit_start:end])
+l2_L2_w_slope, l2_L2_w_fit = fit_power_law(Δts[l2_fit_start:end], l2_L2_w_errs[l2_fit_start:end])
+l2_L∞_u_slope, l2_L∞_u_fit = fit_power_law(Δts[l2_fit_start:end], l2_L∞_u_errs[l2_fit_start:end])
+l2_L∞_w_slope, l2_L∞_w_fit = fit_power_law(Δts[l2_fit_start:end], l2_L∞_w_errs[l2_fit_start:end])
 
-rk_L2_u_slope, rk_L2_u_fit = fit_power_law(Δts, rk_L2_u_errs)
-rk_L2_w_slope, rk_L2_w_fit = fit_power_law(Δts, rk_L2_w_errs)
-rk_L∞_u_slope, rk_L∞_u_fit = fit_power_law(Δts, rk_L∞_u_errs)
-rk_L∞_w_slope, rk_L∞_w_fit = fit_power_law(Δts, rk_L∞_w_errs)
+rk_L2_u_slope, rk_L2_u_fit = fit_power_law(Δts[rk_fit_start:end], rk_L2_u_errs[rk_fit_start:end])
+rk_L2_w_slope, rk_L2_w_fit = fit_power_law(Δts[rk_fit_start:end], rk_L2_w_errs[rk_fit_start:end])
+rk_L∞_u_slope, rk_L∞_u_fit = fit_power_law(Δts[rk_fit_start:end], rk_L∞_u_errs[rk_fit_start:end])
+rk_L∞_w_slope, rk_L∞_w_fit = fit_power_law(Δts[rk_fit_start:end], rk_L∞_w_errs[rk_fit_start:end])
 
 scatter!(axL2, Δts, l0_L2_u_errs, markersize=markersize)
 scatter!(axL2, Δts, l0_L2_w_errs, markersize=markersize)
@@ -281,14 +372,14 @@ scatter!(axL2, Δts, l2_L2_w_errs, markersize=markersize)
 scatter!(axL2, Δts, rk_L2_u_errs, markersize=markersize)
 scatter!(axL2, Δts, rk_L2_w_errs, markersize=markersize)
 
-lines!(axL2, Δts[lm_fit_start:end], l0_L2_u_fit, label="FPJ0-RK3 u (slope = $(round(l0_L2_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL2, Δts[lm_fit_start:end], l0_L2_w_fit, label="FPJ0-RK3 w (slope = $(round(l0_L2_w_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL2, Δts[lm_fit_start:end], l1_L2_u_fit, label="FPJ1-RK3 u (slope = $(round(l1_L2_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL2, Δts[lm_fit_start:end], l1_L2_w_fit, label="FPJ1-RK3 w (slope = $(round(l1_L2_w_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL2, Δts[lm_fit_start:end], l2_L2_u_fit, label="FPJ2-RK3 u (slope = $(round(l2_L2_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL2, Δts[lm_fit_start:end], l2_L2_w_fit, label="FPJ2-RK3 w (slope = $(round(l2_L2_w_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL2, Δts, rk_L2_u_fit, label="RK3 u (slope = $(round(rk_L2_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL2, Δts, rk_L2_w_fit, label="RK3 w (slope = $(round(rk_L2_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l0_fit_start:end], l0_L2_u_fit, label="FPJ0 u (slope = $(round(l0_L2_u_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l0_fit_start:end], l0_L2_w_fit, label="FPJ0 w (slope = $(round(l0_L2_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l1_fit_start:end], l1_L2_u_fit, label="FPJ1 u (slope = $(round(l1_L2_u_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l1_fit_start:end], l1_L2_w_fit, label="FPJ1 w (slope = $(round(l1_L2_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l2_fit_start:end], l2_L2_u_fit, label="FPJ2 u (slope = $(round(l2_L2_u_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[l2_fit_start:end], l2_L2_w_fit, label="FPJ2 w (slope = $(round(l2_L2_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, Δts[rk_fit_start:end], rk_L2_u_fit, label="RK3 u (slope = $(round(rk_L2_u_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
+lines!(axL2, Δts[rk_fit_start:end], rk_L2_w_fit, label="RK3 w (slope = $(round(rk_L2_w_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
 
 scatter!(axL∞, Δts, l0_L∞_u_errs, markersize=markersize)
 scatter!(axL∞, Δts, l0_L∞_w_errs, markersize=markersize)
@@ -298,19 +389,19 @@ scatter!(axL∞, Δts, l2_L∞_u_errs, markersize=markersize)
 scatter!(axL∞, Δts, l2_L∞_w_errs, markersize=markersize)
 scatter!(axL∞, Δts, rk_L∞_u_errs, markersize=markersize)
 scatter!(axL∞, Δts, rk_L∞_w_errs, markersize=markersize)
-lines!(axL∞, Δts[lm_fit_start:end], l0_L∞_u_fit, label="FPJ0-RK3 u (slope = $(round(l0_L∞_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL∞, Δts[lm_fit_start:end], l0_L∞_w_fit, label="FPJ0-RK3 w (slope = $(round(l0_L∞_w_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL∞, Δts[lm_fit_start:end], l1_L∞_u_fit, label="FPJ1-RK3 u (slope = $(round(l1_L∞_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL∞, Δts[lm_fit_start:end], l1_L∞_w_fit, label="FPJ1-RK3 w (slope = $(round(l1_L∞_w_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL∞, Δts[lm_fit_start:end], l2_L∞_u_fit, label="FPJ2-RK3 u (slope = $(round(l2_L∞_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL∞, Δts[lm_fit_start:end], l2_L∞_w_fit, label="FPJ2-RK3 w (slope = $(round(l2_L∞_w_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL∞, Δts, rk_L∞_u_fit, label="RK3 u (slope = $(round(rk_L∞_u_slope, sigdigits=3)))", linewidth=linewidth)
-lines!(axL∞, Δts, rk_L∞_w_fit, label="RK3 w (slope = $(round(rk_L∞_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l0_fit_start:end], l0_L∞_u_fit, label="FPJ0 u (slope = $(round(l0_L∞_u_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l0_fit_start:end], l0_L∞_w_fit, label="FPJ0 w (slope = $(round(l0_L∞_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l1_fit_start:end], l1_L∞_u_fit, label="FPJ1 u (slope = $(round(l1_L∞_u_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l1_fit_start:end], l1_L∞_w_fit, label="FPJ1 w (slope = $(round(l1_L∞_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l2_fit_start:end], l2_L∞_u_fit, label="FPJ2 u (slope = $(round(l2_L∞_u_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[l2_fit_start:end], l2_L∞_w_fit, label="FPJ2 w (slope = $(round(l2_L∞_w_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, Δts[rk_fit_start:end], rk_L∞_u_fit, label="RK3 u (slope = $(round(rk_L∞_u_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
+lines!(axL∞, Δts[rk_fit_start:end], rk_L∞_w_fit, label="RK3 w (slope = $(round(rk_L∞_w_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
 axislegend(axL2, position=:lt)
 axislegend(axL∞, position=:lt)
 display(fig)
-save("./$(filename_prefix)_convergence.png", fig, px_per_unit=4)
-save("./$(filename_prefix)_convergence.pdf", fig)
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_convergence.png"), fig, px_per_unit=4)
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_convergence.pdf"), fig)
 
 #%%
 model = setup_model(grid, :RungeKutta3)
@@ -379,6 +470,63 @@ xF = xnodes(grid, Face())
 zC = znodes(grid, Center())
 zF = znodes(grid, Face())
 
+#%%
+fig = Figure(size=(1200, 800), fontsize=18)
+
+axu1 = Axis(fig[1, 1], xlabel="x", ylabel="z", title="Initial time, t = $(times[1])")
+axw1 = Axis(fig[1, 2], xlabel="x", ylabel="z", title="Initial time, t = $(times[1])")
+axp1 = Axis(fig[1, 3], xlabel="x", ylabel="z", title="Initial time, t = $(times[1])")
+
+axu2 = Axis(fig[2, 1], xlabel="x", ylabel="z", title="Final time, t = $(times[end])")
+axw2 = Axis(fig[2, 2], xlabel="x", ylabel="z", title="Final time, t = $(times[end])")
+axp2 = Axis(fig[2, 3], xlabel="x", ylabel="z", title="Final time, t = $(times[end])")
+
+u1 = interior(u_data[1], :, 1, :)
+w1 = interior(w_data[1], :, 1, :)
+p1 = interior(p_data[1], :, 1, :)
+
+u2 = interior(u_data[end], :, 1, :)
+w2 = interior(w_data[end], :, 1, :)
+p2 = interior(p_data[end], :, 1, :)
+
+ulim = (-maximum(abs.(vcat(u1, u2))) - 1e-4, maximum(abs.(vcat(u1, u2))) + 1e-4)
+wlim = (-maximum(abs.(vcat(w1, w2))) - 1e-4, maximum(abs.(vcat(w1, w2))) + 1e-4)
+plim = (minimum(vcat(p1, p2)) - 1e-4, maximum(vcat(p1, p2)) + 1e-4)
+
+hmu1 = heatmap!(axu1, xF, zC, interior(u_data[1], :, 1, :), colormap=:balance, colorrange=ulim)
+hmw1 = heatmap!(axw1, xC, zF, interior(w_data[1], :, 1, :), colormap=:balance, colorrange=wlim)
+hmp1 = heatmap!(axp1, xC, zC, interior(p_data[1], :, 1, :), colormap=:viridis, colorrange=plim)
+
+hmu2 = heatmap!(axu2, xF, zC, interior(u_data[end], :, 1, :), colormap=:balance, colorrange=ulim)
+hmw2 = heatmap!(axw2, xC, zF, interior(w_data[end], :, 1, :), colormap=:balance, colorrange=wlim)
+hmp2 = heatmap!(axp2, xC, zC, interior(p_data[end], :, 1, :), colormap=:viridis, colorrange=plim)
+
+Colorbar(fig[3, 1], hmu1, vertical=false, flipaxis=false, label="y-averaged horizontal velocity (u)")
+Colorbar(fig[3, 2], hmw1, vertical=false, flipaxis=false, label="y-averaged vertical velocity (w)")
+Colorbar(fig[3, 3], hmp1, vertical=false, flipaxis=false, label="y-averaged pressure (p)")
+
+linkaxes!(axu1, axu2, axw1, axw2, axp1, axp2)
+
+hidexdecorations!(axu1, ticks=false)
+hidexdecorations!(axw1, ticks=false)
+hidexdecorations!(axp1, ticks=false)
+
+hidexdecorations!(axu2, ticks=false, ticklabels=false, label=false)
+hidexdecorations!(axw2, ticks=false, ticklabels=false, label=false)
+hidexdecorations!(axp2, ticks=false, ticklabels=false, label=false)
+
+hideydecorations!(axu1, ticks=false, ticklabels=false, label=false)
+hideydecorations!(axw1, ticks=false)
+hideydecorations!(axp1, ticks=false)
+
+hideydecorations!(axu2, ticks=false, ticklabels=false, label=false)
+hideydecorations!(axw2, ticks=false)
+hideydecorations!(axp2, ticks=false)
+
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_initial_final.png"), fig, px_per_unit=4)
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_initial_final.pdf"), fig)
+
+#%%
 fig = Figure(size=(1200, 500))
 n = Observable(1)
 ax_u = Axis(fig[1, 1], title="Horizontal velocity", xlabel="x", ylabel="z")
@@ -405,7 +553,7 @@ titlestr = @lift "Time = $(round(times[$n], sigdigits=2)) s"
 Label(fig[0, :], titlestr, font=:bold)
 display(fig)
 
-CairoMakie.record(fig, "./$(filename_prefix)_RK3.mp4", 1:Nt, framerate=15) do nn
+CairoMakie.record(fig, joinpath(OUTPUT_DIR, "$(filename_prefix)_RK3.mp4"), 1:Nt, framerate=15) do nn
     n[] = nn
 end
 
@@ -415,20 +563,24 @@ model_l1 = setup_model(grid, :LeMoinRungeKutta3FPJ1)
 model_l2 = setup_model(grid, :LeMoinRungeKutta3FPJ2)
 model_rk = setup_model(grid, :RungeKutta3)
 
-wall_time_l0 = zeros(200)
-wall_time_l1 = zeros(200)
-wall_time_l2 = zeros(200)
-wall_time_rk = zeros(200)
+# wall_time_l0 = zeros(200)
+# wall_time_l1 = zeros(200)
+# wall_time_l2 = zeros(200)
+# wall_time_rk = zeros(200)
 
-for i in eachindex(wall_time_rk)
-    t_l0 = @timed time_step!(model_l0, Δt_ref)
-    t_l1 = @timed time_step!(model_l1, Δt_ref)
-    t_l2 = @timed time_step!(model_l2, Δt_ref)
-    t_rk = @timed time_step!(model_rk, Δt_ref)
-    wall_time_l0[i] = t_l0.time
-    wall_time_l1[i] = t_l1.time
-    wall_time_l2[i] = t_l2.time
-    wall_time_rk[i] = t_rk.time
+# for i in eachindex(wall_time_rk)
+#     t_l0 = @timed time_step!(model_l0, Δt_ref)
+#     t_l1 = @timed time_step!(model_l1, Δt_ref)
+#     t_l2 = @timed time_step!(model_l2, Δt_ref)
+#     t_rk = @timed time_step!(model_rk, Δt_ref)
+#     wall_time_l0[i] = t_l0.time
+#     wall_time_l1[i] = t_l1.time
+#     wall_time_l2[i] = t_l2.time
+#     wall_time_rk[i] = t_rk.time
+# end
+
+wall_time_l0, wall_time_l1, wall_time_l2, wall_time_rk = jldopen(joinpath(DATA_DIR, "$(filename_prefix)_timings.jld2"), "r") do file
+    file["l0"], file["l1"], file["l2"], file["rk"]
 end
 
 median_wall_time_l0 = median(wall_time_l0)
@@ -442,6 +594,15 @@ total_time_l0 = median_wall_time_l0 .* Nts
 total_time_l1 = median_wall_time_l1 .* Nts
 total_time_l2 = median_wall_time_l2 .* Nts
 total_time_rk = median_wall_time_rk .* Nts
+
+# jldopen(joinpath(DATA_DIR, "$(filename_prefix)_timings.jld2"), "w") do file
+#     file["l0"] = wall_time_l0
+#     file["l1"] = wall_time_l1
+#     file["l2"] = wall_time_l2
+#     file["rk"] = wall_time_rk
+# end
+#%%
+
 #%%
 fig = Figure(size=(900, 500), fontsize=15)
 axL2 = Axis(fig[1, 1], title="L2 error at final time", xlabel="Wall time (s)", ylabel="L2 error", xscale=log10, yscale=log10)
@@ -507,3 +668,49 @@ axislegend(axL∞, position=:rt)
 display(fig)
 save("./$(filename_prefix)_convergence_wall_time.png", fig, px_per_unit=4)
 save("./$(filename_prefix)_convergence_wall_time.pdf", fig)
+#%%
+fig = Figure(size=(900, 500), fontsize=15)
+axL2 = Axis(fig[1, 1], xlabel="Wall time (s)", ylabel="L2 error", xscale=log10, yscale=log10)
+axL∞ = Axis(fig[1, 2], xlabel="Wall time (s)", ylabel="L∞ error", xscale=log10, yscale=log10)
+
+l0_fit_start = 5
+l1_fit_start = 7
+l2_fit_start = 7
+rk_fit_start = 4
+markersize = 13
+linewidth = 2
+
+l0_L2_slope, l0_L2_fit = fit_power_law(total_time_l0[l0_fit_start:end], l0_L2_errs[l0_fit_start:end])
+l0_L∞_slope, l0_L∞_fit = fit_power_law(total_time_l0[l0_fit_start:end], l0_L∞_errs[l0_fit_start:end])
+l1_L2_slope, l1_L2_fit = fit_power_law(total_time_l1[l1_fit_start:end], l1_L2_errs[l1_fit_start:end])
+l1_L∞_slope, l1_L∞_fit = fit_power_law(total_time_l1[l1_fit_start:end], l1_L∞_errs[l1_fit_start:end])
+l2_L2_slope, l2_L2_fit = fit_power_law(total_time_l2[l2_fit_start:end], l2_L2_errs[l2_fit_start:end])
+l2_L∞_slope, l2_L∞_fit = fit_power_law(total_time_l2[l2_fit_start:end], l2_L∞_errs[l2_fit_start:end])
+rk_L2_slope, rk_L2_fit = fit_power_law(total_time_rk[rk_fit_start:end], rk_L2_errs[rk_fit_start:end])
+rk_L∞_slope, rk_L∞_fit = fit_power_law(total_time_rk[rk_fit_start:end], rk_L∞_errs[rk_fit_start:end])
+
+scatter!(axL2, total_time_l0, l0_L2_errs, markersize=markersize, marker=:circle)
+scatter!(axL2, total_time_l1, l1_L2_errs, markersize=markersize, marker=:rect)
+scatter!(axL2, total_time_l2, l2_L2_errs, markersize=markersize, marker=:utriangle)
+scatter!(axL2, total_time_rk, rk_L2_errs, markersize=markersize, marker=:cross)
+
+lines!(axL2, total_time_l0[l0_fit_start:end], l0_L2_fit, label="FPJ0 (slope = $(round(l0_L2_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, total_time_l1[l1_fit_start:end], l1_L2_fit, label="FPJ1 (slope = $(round(l1_L2_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, total_time_l2[l2_fit_start:end], l2_L2_fit, label="FPJ2 (slope = $(round(l2_L2_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL2, total_time_rk[rk_fit_start:end], rk_L2_fit, label="RK3 (slope = $(round(rk_L2_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
+
+scatter!(axL∞, total_time_l0, l0_L∞_errs, markersize=markersize, marker=:circle)
+scatter!(axL∞, total_time_l1, l1_L∞_errs, markersize=markersize, marker=:rect)
+scatter!(axL∞, total_time_l2, l2_L∞_errs, markersize=markersize, marker=:utriangle)
+scatter!(axL∞, total_time_rk, rk_L∞_errs, markersize=markersize, marker=:cross)
+
+lines!(axL∞, total_time_l0[l0_fit_start:end], l0_L∞_fit, label="FPJ0 (slope = $(round(l0_L∞_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, total_time_l1[l1_fit_start:end], l1_L∞_fit, label="FPJ1 (slope = $(round(l1_L∞_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, total_time_l2[l2_fit_start:end], l2_L∞_fit, label="FPJ2 (slope = $(round(l2_L∞_slope, sigdigits=3)))", linewidth=linewidth)
+lines!(axL∞, total_time_rk[rk_fit_start:end], rk_L∞_fit, label="RK3 (slope = $(round(rk_L∞_slope, sigdigits=3)))", linewidth=linewidth, linestyle=:dash)
+
+axislegend(axL2, position=:rt)
+axislegend(axL∞, position=:rt)
+display(fig)
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_combined_error_vs_runtime.png"), fig, px_per_unit=4)
+save(joinpath(OUTPUT_DIR, "$(filename_prefix)_combined_error_vs_runtime.pdf"), fig)
